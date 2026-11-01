@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -18,6 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import agent as agent_mod
+from . import cleanup as cleanup_mod
 from . import profile as profile_mod
 from .config import (
     APP_VERSION,
@@ -29,7 +31,16 @@ from .config import (
 )
 from .storage import store
 
-app = FastAPI(title="FreeFateStudio Local API", version=APP_VERSION)
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """服务就绪后在后台回收 checkpoint 垃圾，不阻塞启动。"""
+    cleanup_mod.start_background()
+    yield
+
+
+app = FastAPI(title="FreeFateStudio Local API", version=APP_VERSION,
+              lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -157,6 +168,14 @@ def delete_conversation(cid: str) -> Dict[str, Any]:
 @app.get("/api/conversations/{cid}/messages")
 def get_messages(cid: str) -> List[Dict[str, Any]]:
     return store.get_messages(cid)
+
+
+@app.get("/api/conversations/{cid}/context")
+def get_context(cid: str) -> Dict[str, Any]:
+    """该会话当前的上下文占用，切过去时用来给进度环一个初值。"""
+    if not store.get_conversation(cid):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return agent_mod.context_snapshot(cid)
 
 
 # ------------------------------------------------------------

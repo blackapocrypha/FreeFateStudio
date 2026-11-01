@@ -30,6 +30,15 @@ LangGraph ReAct Agent（llm_node / tool_node / router 手写循环）
   └─ %LOCALAPPDATA%\FreeFateStudio\checkpoint.db  LangGraph 图状态（多轮上下文）
 ```
 
+两个库职责不同：`fate.db` 是你看得见的会话与消息，`checkpoint.db` 是模型的记忆
+（每轮 2–3 条快照，约 6 KB/条）。删除会话时两边同步清理；程序启动时还会在后台跑一次
+回收（`app/cleanup.py`，失败只记日志、不影响启动）：
+
+- **回收孤儿**：`fate.db` 里已不存在的会话，其 checkpoint 永远读不到，直接删掉。
+  只动 `checkpoint.db`，会话列表与消息全文不受任何影响。
+- **体积兜底**：`checkpoint.db` 超过 200 MB 时，按「最久未活跃」顺序删 thread，降到 160 MB 停。
+  最近 30 天内活跃过的 thread、以及最新的 5 个 thread 始终保留。
+
 ## 运行
 
 ```bash
@@ -88,6 +97,29 @@ FATE_THINKING=0
 校验在服务端（`app/profile.py`）完成：日期必须是真实存在的公历日期、不早于 1900 年、不晚于今天；
 时刻 0-23:59；性别必须是男或女（大运顺逆完全依赖性别）。`1990/5/2` + `14:5` 这类写法会被规范化成
 `1990-05-02` + `14:05` 后回填。
+
+## 上下文压缩（Compaction）
+
+| 参数（`.env` 可覆盖） | 默认值 | 含义 |
+|---|---|---|
+| `FATE_RESERVE_TOKENS` | 16384 | 预留给模型输出、工具调用与后续响应的 token |
+| `FATE_KEEP_RECENT_TOKENS` | 20000 | 压缩后仍保留**原文**的最近 token 数 |
+| `FATE_CONTEXT_WINDOW` | 按模型名推断，默认 128000 | 模型上下文窗口 |
+| `FATE_COMPACTION` | 1 | 设 0 关闭自动压缩 |
+
+触发条件是 `contextTokens > contextWindow - reserveTokens`——128K 窗口即 111.6K 起压。
+这里的 `contextTokens` 含每轮都发送的 system prompt（约 2K），不含它会让进度长期偏低。
+
+压缩时做四件事：
+
+1. **切点对齐**——只在用户消息处切分，绝不把 `tool_call` 和它的 `tool_result` 拆开，
+   否则下一轮请求会因配对失败直接报错；
+2. **独立摘要请求**——丢弃段单独发一次 LLM，压成结构化摘要：
+   `用户与档案 / 关键数据（命盘 卦象 日期）/ 已给出的结论与建议 / 工具与数据轨迹 / 未决事项与偏好`；
+   待压内容超过单次请求预算时分段摘要再合并（map-reduce）；
+3. **保留近期原文**——最近约 20K token 的对话一个字不改，用户原话与工具原始返回都还在；
+4. **写回 checkpoint**——`RemoveMessage(REMOVE_ALL_MESSAGES)` + 新序列整段替换，
+   旧消息不留残影。
 
 ## 排盘口径
 
@@ -164,23 +196,32 @@ app/
   config.py           路径、模型、端口、密钥
   storage.py          SQLite 会话、消息与个人信息
   profile.py          个人信息校验、地名解析、提示词档案段
+  compaction.py       上下文压缩（计量、切点、摘要、map-reduce 合并）
   agent.py            LangGraph Agent + SQLite checkpointer
-  api.py              FastAPI：会话 CRUD + 个人信息 + SSE 流式对话
+  api.py              FastAPI：会话 CRUD + 个人信息 + 上下文占用 + SSE 流式对话
   server.py           进程内 uvicorn 生命周期
   tools/              命理工具层（含 memory.py：读取本人档案）
   ui/                 界面（主题、Markdown 渲染、SSE 客户端、主窗口、会话列表、设置浮层、自绘图标）
+    context_ring.py   输入框右下角的上下文进度环
 tests/
   smoke_tools.py      工具层自检（六十四卦/排盘/黄历/词典/SQLite）
   smoke_shensha.py    神煞/十二长生/月令权重自检（逐条规则断言）
+  smoke_cleanup.py    checkpoint 回收自检（孤儿、保护期、体积下限、幂等）
   smoke_api.py        后端全链路自检（SSE、落库、多轮记忆、删除）
   smoke_profile.py    个人信息自检（校验规则、真太阳时开关、提示词注入、工具输出）
   smoke_settings.py   设置读写自检（.env 改写、热重建、错误分支）
+  smoke_compaction.py     压缩算法自检（估算、阈值、切点、map-reduce、跳过分支）
+  smoke_compaction_graph.py 压缩与 checkpoint 的集成自检
+  smoke_compaction_sse.py   压缩事件端到端自检（HTTP + SSE，假模型不联网）
   live_me_profile.py  端到端验证：只说「我」时是否按档案排盘（真实调用模型）
   live_shensha.py     端到端验证：神煞/禄绝/月令是否被模型正确引用（真实调用模型）
+  live_compaction.py  端到端验证：小窗口下多轮必然触发压缩（真实调用模型）
   ui_shot.py          界面冒烟并截图
   ui_settings_shot.py 设置浮层交互自检并截图
   ui_profile_shot.py  个人信息面板交互自检并截图
   ui_conv_menu.py     会话行尾「⋯」与删除入口自检并截图
+  ui_context_ring.py  进度环各档位渲染与位置自检并截图
+  ui_composer_card.py 输入卡片自检（按钮在框内、空输入不可点、多行长高、Enter 提交）
 ```
 
 

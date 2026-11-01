@@ -59,6 +59,16 @@ class ApiClient:
         except httpx.HTTPError:
             return []
 
+    def context(self, cid: str) -> Dict[str, Any]:
+        """该会话的上下文占用（token / 窗口 / 阈值）。"""
+        try:
+            r = httpx.get(self._url(f"/api/conversations/{cid}/context"),
+                          timeout=self._timeout)
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPError:
+            return {}
+
     # ---- 设置（模型 / API Key，落盘 .env）----
     def settings(self) -> Dict[str, Any]:
         try:
@@ -132,6 +142,7 @@ class ChatWorker(QThread):
     tool = Signal(str)
     reset = Signal()
     meta = Signal(dict)
+    context = Signal(dict)
     error = Signal(str)
     saved = Signal()
     done = Signal()
@@ -173,6 +184,8 @@ class ChatWorker(QThread):
                             self.reset.emit()
                         elif kind == "meta":
                             self.meta.emit(event)
+                        elif kind in ("context", "compacting", "compacted"):
+                            self.context.emit(event)
                         elif kind == "saved":
                             self.saved.emit()
                         elif kind == "error":

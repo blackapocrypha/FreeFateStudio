@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut, QTextOption
 from PySide6.QtWidgets import (
     QFrame,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 from ..config import APP_SUBTITLE, APP_TITLE
 from . import md
 from .client import ApiClient, ChatWorker
+from .context_ring import ContextRing
 from .conv_list import ConvList
 from .icons import gear_icon
 from .settings_popup import SettingsPopup
@@ -98,31 +99,101 @@ class ToolChip(QLabel):
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
 
-class Composer(QTextEdit):
+class Composer(QFrame):
+    """输入卡片：输入区在上，上下文环与发送键收在框内右下角。
+
+    这样排是为了对齐主流 Agent 产品的手感——按钮不再挂在框外，
+    多行输入时卡片整体长高、按钮始终贴住底边；空内容时按钮置灰不可点。
+    """
+
     submitted = Signal()
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("composer")
-        self.setPlaceholderText(
-            "想问点什么…  说「我」默认按个人信息的出生时间排盘　Enter 发送 / Shift+Enter 换行"
+    _MIN_EDIT = 26
+    _MAX_EDIT = 150
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("composerCard")
+        self.setProperty("active", False)
+
+        box = QVBoxLayout(self)
+        box.setContentsMargins(15, 12, 10, 9)
+        box.setSpacing(7)
+
+        self.edit = QTextEdit()
+        self.edit.setObjectName("composer")
+        self.edit.setPlaceholderText(
+            "想问点什么…  说「我」默认按档案排盘　Enter 发送 / Shift+Enter 换行"
         )
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setFixedHeight(52)
-        self.textChanged.connect(self._auto_grow)
+        self.edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.edit.setFrameShape(QFrame.NoFrame)
+        self.edit.setFixedHeight(self._MIN_EDIT)
+        self.edit.textChanged.connect(self._auto_grow)
+        self.edit.installEventFilter(self)
+        box.addWidget(self.edit)
 
+        # 底部操作条：右侧放环与发送键，左侧留给以后的附件入口
+        self.actions = QHBoxLayout()
+        self.actions.setContentsMargins(0, 0, 0, 0)
+        self.actions.setSpacing(8)
+        self.actions.addStretch(1)
+        box.addLayout(self.actions)
+
+        # 点击卡片留白处也应回到输入区，否则按钮周围一圈点了没反应
+        self.setFocusProxy(self.edit)
+
+    # -- 对外接口保持和原来的 QTextEdit 一致，窗口里的调用不用改 --
+    def toPlainText(self) -> str:  # noqa: N802
+        return self.edit.toPlainText()
+
+    def clear(self) -> None:
+        self.edit.clear()
+
+    def add_action(self, widget: QWidget) -> None:
+        self.actions.addWidget(widget, 0, Qt.AlignVCenter)
+
+    def set_placeholder(self, text: str) -> None:
+        self.edit.setPlaceholderText(text)
+
+    def focus_input(self) -> None:
+        """把光标交给真正的输入区（卡片的焦点代理，显式调用更直观）。"""
+        self.edit.setFocus()
+
+    # -- 内部 --
     def _auto_grow(self) -> None:
-        doc_h = int(self.document().size().height()) + 22
-        self.setFixedHeight(max(52, min(170, doc_h)))
+        doc_h = int(self.edit.document().size().height()) + 4
+        height = max(self._MIN_EDIT, min(self._MAX_EDIT, doc_h))
+        if height != self.edit.height():
+            self.edit.setFixedHeight(height)
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
-            event.modifiers() & Qt.ShiftModifier
-        ):
-            self.submitted.emit()
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # 窗口改宽后换行位置变了，固定高度得跟着重算，否则会出现空行或截字
+        self._auto_grow()
+
+    def _set_active(self, active: bool) -> None:
+        if bool(self.property("active")) == active:
             return
-        super().keyPressEvent(event)
+        self.setProperty("active", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self.edit:
+            etype = event.type()
+            if etype == QEvent.FocusIn:
+                self._set_active(True)
+            elif etype == QEvent.FocusOut:
+                self._set_active(False)
+            elif etype == QEvent.KeyPress:
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
+                    event.modifiers() & Qt.ShiftModifier
+                ):
+                    self.submitted.emit()
+                    return True
+        return super().eventFilter(obj, event)
 
 
 # ------------------------------------------------------------
@@ -184,6 +255,10 @@ class MessageArea(QWidget):
     def add_tool(self, label: str) -> None:
         chip = ToolChip(f"调用 {label}")
         self._insert(chip)
+
+    def add_notice(self, text: str) -> None:
+        """系统动作提示（如上下文压缩），与工具调用区分开。"""
+        self._insert(ToolChip(text))
 
     def add_error(self, text: str) -> None:
         lab = QLabel(f"⚠ {text}")
@@ -328,33 +403,37 @@ class MainWindow(QMainWindow):
         wrap = QFrame()
         wrap.setObjectName("composerWrap")
         wbox = QVBoxLayout(wrap)
-        wbox.setContentsMargins(56, 6, 56, 14)
-        wbox.setSpacing(6)
+        wbox.setContentsMargins(56, 8, 56, 14)
+        wbox.setSpacing(8)
 
-        row = QHBoxLayout()
-        row.setSpacing(10)
         self.composer = Composer()
         self.composer.submitted.connect(self.send_message)
-        row.addWidget(self.composer, 1)
+        self.composer.edit.textChanged.connect(self._refresh_send)
+
+        # 上下文进度环与发送键都在框内右下角，和主流 Agent 输入框一致
+        self.ctx_ring = ContextRing()
+        self.composer.add_action(self.ctx_ring)
 
         self.send_btn = QPushButton("↑")
         self.send_btn.setObjectName("send")
-        self.send_btn.setFixedSize(30, 30)
+        self.send_btn.setFixedSize(32, 32)
         self.send_btn.setCursor(Qt.PointingHandCursor)
+        self.send_btn.setToolTip("发送（Enter）")
         self.send_btn.clicked.connect(self.send_message)
-        row.addWidget(self.send_btn, 0, Qt.AlignBottom)
-        wbox.addLayout(row)
+        self.composer.add_action(self.send_btn)
+        wbox.addWidget(self.composer)
 
         hint = QLabel("内容由 AI 生成，命理属传统文化参考，不替代医疗、法律、投资决策")
         hint.setObjectName("hint")
         hint.setAlignment(Qt.AlignCenter)
         wbox.addWidget(hint)
         box.addWidget(wrap)
+        self._refresh_send()
         return main
 
     def _bind_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+N"), self, activated=lambda: self.new_conversation())
-        QShortcut(QKeySequence("Ctrl+L"), self, activated=lambda: self.composer.setFocus())
+        QShortcut(QKeySequence("Ctrl+L"), self, activated=lambda: self.composer.focus_input())
 
     # ---------------- 会话列表 ----------------
     def refresh_conversations(self, select_id: Optional[str] = None) -> None:
@@ -394,8 +473,9 @@ class MainWindow(QMainWindow):
         self.current_id = conv["id"]
         self.refresh_conversations(select_id=self.current_id)
         self.title_label.setText("新对话")
+        self.ctx_ring.reset()
         self._show_empty()
-        self.composer.setFocus()
+        self.composer.focus_input()
 
     def _delete_conversation(self, cid: str) -> None:
         """删除指定会话（入口在列表行尾的「⋯」里，不再放在右上角）。"""
@@ -407,6 +487,7 @@ class MainWindow(QMainWindow):
         if cid == self.current_id:
             self.current_id = None
             self.title_label.setText("新对话")
+            self.ctx_ring.reset()
             self._show_empty()
         self.refresh_conversations()
 
@@ -425,6 +506,7 @@ class MainWindow(QMainWindow):
         self.area.clear()
         if not messages:
             self._show_empty()
+            self._sync_context()
             return
         for msg in messages:
             if msg["role"] == "user":
@@ -432,6 +514,18 @@ class MainWindow(QMainWindow):
             else:
                 self.area.add_assistant(msg["content"])
         self._scroll_bottom()
+        self._sync_context()
+
+    def _sync_context(self) -> None:
+        """切会话时先给进度环一个初值，避免显示上一个会话的占用。"""
+        if not self.current_id:
+            self.ctx_ring.reset()
+            return
+        snapshot = self.api.context(self.current_id)
+        if snapshot:
+            self.ctx_ring.set_state(snapshot)
+        else:
+            self.ctx_ring.reset()
 
     # ---------------- 发送 ----------------
     def send_message(self) -> None:
@@ -452,10 +546,10 @@ class MainWindow(QMainWindow):
 
         self.area.add_user(text)
         self.composer.clear()
-        self.send_btn.setEnabled(False)
 
         self._buf = ""
         self.area.start_assistant()
+        self.ctx_ring.set_busy(False)
         self._scroll_bottom()
 
         self.worker = ChatWorker(self.base_url, self.current_id, text)
@@ -463,9 +557,17 @@ class MainWindow(QMainWindow):
         self.worker.tool.connect(self._on_tool)
         self.worker.reset.connect(self._on_reset)
         self.worker.meta.connect(self._on_meta)
+        self.worker.context.connect(self._on_context)
         self.worker.error.connect(self._on_error)
         self.worker.done.connect(self._on_done)
         self.worker.start()
+        self._refresh_send()
+
+    def _refresh_send(self) -> None:
+        """空内容或正在生成时发送键置灰，避免点了个没反应。"""
+        busy = self.worker is not None and self.worker.isRunning()
+        ready = bool(self.composer.toPlainText().strip())
+        self.send_btn.setEnabled(ready and not busy)
 
     def _on_token(self, text: str) -> None:
         self._buf += text
@@ -488,6 +590,23 @@ class MainWindow(QMainWindow):
 
     def _on_tool(self, label: str) -> None:
         self.area.add_tool(label)
+        self._scroll_bottom()
+
+    def _on_context(self, event: Dict[str, Any]) -> None:
+        """上下文事件：更新右下角进度环，压缩完成时在对话里留一行痕迹。"""
+        self.ctx_ring.apply_event(event)
+        if event.get("type") != "compacted":
+            return
+        if event.get("error"):
+            self.area.add_notice(f"上下文压缩失败，本轮按原文继续：{event['error']}")
+        elif not event.get("skipped"):
+            before = float(event.get("before") or 0)
+            after = float(event.get("after") or 0)
+            self.area.add_notice(
+                f"已压缩上下文 {before / 1000:.1f}K → {after / 1000:.1f}K tokens"
+                f"（{event.get('summarized', 0)} 条旧消息转摘要，"
+                f"保留最近 {event.get('kept', 0)} 条原文）"
+            )
         self._scroll_bottom()
 
     def _on_reset(self) -> None:
@@ -518,8 +637,10 @@ class MainWindow(QMainWindow):
             widget.deleteLater()
             self.area._stream_widget = None
         self.area._stream_widget = None
-        self.send_btn.setEnabled(True)
+        # 流被中断时 compacted 可能没到，这里兜一下，别让环一直转圈
+        self.ctx_ring.set_busy(False)
         self.worker = None
+        self._refresh_send()
         self.refresh_conversations(select_id=self.current_id)
         self._scroll_bottom()
 

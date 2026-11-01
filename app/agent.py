@@ -13,11 +13,13 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from langchain.messages import SystemMessage, ToolMessage
 from langchain.tools import BaseTool
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessageChunk, RemoveMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
+from . import compaction
 from .config import (
     CKPT_PATH,
     api_key,
@@ -156,6 +158,33 @@ def _system_message() -> SystemMessage:
     return SystemMessage(content=SYSTEM_PROMPT + "\n" + profile_prompt())
 
 
+def _thread_config(conversation_id: str) -> Dict[str, Any]:
+    return {"configurable": {"thread_id": conversation_id}}
+
+
+def _history(graph, config: Dict[str, Any]) -> List[Any]:
+    """读当前会话的图状态消息；读不到就当空历史。"""
+    try:
+        snapshot = graph.get_state(config)
+        return list((snapshot.values or {}).get("messages", []))
+    except Exception:
+        return []
+
+
+def _overhead_tokens() -> int:
+    """系统提示每轮都会发送，但不进 checkpoints，估算上下文占用时要单独加上。"""
+    return compaction.estimate_tokens(SYSTEM_PROMPT) + compaction.estimate_tokens(
+        profile_prompt()
+    )
+
+
+def context_snapshot(conversation_id: str) -> Dict[str, Any]:
+    """给界面用的上下文占用快照（切换会话时调用）。"""
+    graph = get_graph()
+    messages = _history(graph, _thread_config(conversation_id))
+    return compaction.context_state(messages, _overhead_tokens(), model_name())
+
+
 def _llm_node_factory(model_with_tools):
     def llm_node(state: MessagesState) -> dict:
         messages = list(state["messages"])
@@ -232,14 +261,67 @@ TOOL_LABELS = {
 }
 
 
+def _compact_if_needed(graph, config: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
+    """超窗时把早期对话压成摘要，并就地改写 checkpoint。
+
+    事件：
+      context    {...}  上下文占用快照（每轮都会发，界面用它画进度环）
+      compacting {...}  开始压缩（界面把环切成转圈态）
+      compacted  {...}  压缩结束（含压缩前后 token 与条数）
+    """
+    history = _history(graph, config)
+    snapshot = compaction.context_state(history, _overhead_tokens(), model_name())
+    yield {"type": "context", **snapshot}
+
+    if not compaction.needs_compaction(snapshot):
+        return
+
+    yield {
+        "type": "compacting",
+        "tokens": snapshot["tokens"],
+        "window": snapshot["window"],
+        "threshold": snapshot["threshold"],
+    }
+
+    try:
+        new_messages, info = compaction.compact(history)
+        if info.get("skipped"):
+            yield {"type": "compacted", "skipped": True, **info}
+            return
+        if info.get("after", 0) >= info.get("before", 0):
+            # 压完反而更大（摘要过长、旧内容太少），不如不压，也就不会每轮空转
+            yield {"type": "compacted", "skipped": True,
+                   "reason": "压缩后未变小，保持原样", **info}
+            return
+
+        # 整段替换：先删干净，再按「摘要 + 近期原文」写回。
+        # 不这么做会留下旧消息，RemoveMessage 只对新写入的批次生效。
+        graph.update_state(
+            config,
+            {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)] + new_messages},
+            as_node="llm_node",
+        )
+        yield {"type": "compacted", "skipped": False, **info}
+        yield {"type": "context", **compaction.context_state(
+            new_messages, _overhead_tokens(), model_name()
+        )}
+    except Exception as exc:
+        # 压缩失败不该挡着用户说话：保持原状态继续，让模型自己扛上下文
+        yield {"type": "compacted", "skipped": True,
+               "error": f"{type(exc).__name__}: {exc}"}
+
+
 def stream_chat(conversation_id: str, text: str) -> Iterator[Dict[str, Any]]:
     """同步流式生成事件，供 API 层转为 SSE。
 
     事件类型：
-      token     {"text": "..."}           模型增量输出
-      tool      {"name","label","args"}   即将调用的工具
-      reset     {}                        需要清空已渲染内容（模型进入工具轮）
-      error     {"message": "..."}
+      context    {...}                    上下文占用快照
+      compacting {...}                    即将压缩上下文
+      compacted  {...}                    压缩结束
+      token      {"text": "..."}          模型增量输出
+      tool       {"name","label","args"}  即将调用的工具
+      reset      {}                       需要清空已渲染内容（模型进入工具轮）
+      error      {"message": "..."}
     """
     if not api_key():
         yield {
@@ -249,7 +331,11 @@ def stream_chat(conversation_id: str, text: str) -> Iterator[Dict[str, Any]]:
         return
 
     graph = get_graph()
-    config = {"configurable": {"thread_id": conversation_id}}
+    config = _thread_config(conversation_id)
+
+    # 先量后压：这一轮的实际历史里已包含用户刚说的话（消息由 API 层写入 store，
+    # 但图状态要等 stream 才更新，所以这里量的是「上一轮结束时」的占用）。
+    yield from _compact_if_needed(graph, config)
 
     emitted_tools = set()
     try:
@@ -289,6 +375,13 @@ def stream_chat(conversation_id: str, text: str) -> Iterator[Dict[str, Any]]:
                             yield {"type": "reset"}
     except Exception as exc:  # 网络、鉴权、超时统一回给界面
         yield {"type": "error", "message": f"{type(exc).__name__}: {exc}"}
+
+    # 收尾再报一次占用，用户在环上立刻看到这一轮涨了多少
+    final = compaction.context_state(
+        _history(graph, config), _overhead_tokens(), model_name()
+    )
+    yield {"type": "context", **final}
+
 
 
 def clear_thread(conversation_id: str) -> None:

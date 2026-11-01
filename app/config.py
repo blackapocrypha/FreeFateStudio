@@ -23,7 +23,7 @@ from typing import Any, Dict, Optional
 APP_NAME = "FreeFateStudio"
 APP_TITLE = "FreeFateStudio"
 APP_SUBTITLE = "命理工作台"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.3.0"
 
 # 更名前的数据目录，仅用于首次启动时搬迁
 LEGACY_APP_NAMES = ("FateStudio",)

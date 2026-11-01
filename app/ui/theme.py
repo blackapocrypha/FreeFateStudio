@@ -50,11 +50,13 @@ QPushButton#ghost:hover {{ background: {HOVER}; color: {TEXT}; }}
 QPushButton#danger:hover {{ background: #FBEDEA; color: #B03A2E; }}
 
 QPushButton#send {{
-    background: {ACCENT}; color: #FFFFFF; border: none; border-radius: 14px;
+    background: {ACCENT}; color: #FFFFFF; border: none; border-radius: 16px;
     font-size: 15px; font-weight: 700;
 }}
 QPushButton#send:hover {{ background: #2C2C29; }}
-QPushButton#send:disabled {{ background: #D6D6D1; color: {BG}; }}
+QPushButton#send:pressed {{ background: #000000; }}
+/* 未输入内容时按钮沉到背景里，一眼看出不可点 */
+QPushButton#send:disabled {{ background: #E8E8E2; color: #B6B6AD; }}
 
 QListWidget#convList {{
     background: transparent; border: none; outline: none;
@@ -68,11 +70,15 @@ QListWidget#convList::item:selected {{ background: {SELECTED}; color: {TEXT}; }}
 
 QFrame#header {{ background: {BG}; border-bottom: 1px solid {BORDER_SOFT}; }}
 QFrame#composerWrap {{ background: {BG}; }}
-QTextEdit#composer {{
-    background: {PANEL}; border: 1px solid #E3E3DE; border-radius: 12px;
-    padding: 10px 12px; color: {TEXT}; selection-background-color: #DCDCD5;
+/* 输入卡片：边框在卡片上，里面的 QTextEdit 完全透明无框，按钮才能落在框内 */
+QFrame#composerCard {{
+    background: {PANEL}; border: 1px solid #E3E3DE; border-radius: 14px;
 }}
-QTextEdit#composer:focus {{ border: 1px solid #C6C6BF; }}
+QFrame#composerCard[active="true"] {{ border: 1px solid #C9C9C2; }}
+QTextEdit#composer {{
+    background: transparent; border: none; padding: 0px; color: {TEXT};
+    selection-background-color: #DCDCD5;
+}}
 
 QScrollArea {{ border: none; background: transparent; }}
 QWidget#messagesHost {{ background: {BG}; }}

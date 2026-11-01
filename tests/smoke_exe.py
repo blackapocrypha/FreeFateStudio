@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import subprocess
 import sys
 import time
@@ -15,6 +16,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXE = ROOT / "dist" / "FreeFateStudio" / "FreeFateStudio.exe"
+
+# exe 运行时会往数据目录的 .env 写设置，那里放的是用户真实 Key，
+# 测试前后必须原样备份还原，否则一次冒烟就把真 Key 覆盖成假的了。
+DATA_ENV = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "FreeFateStudio" / ".env"
 
 import httpx  # noqa: E402
 
@@ -78,6 +83,7 @@ def main() -> int:
         return 1
 
     print("启动:", EXE)
+    data_env_backup = DATA_ENV.read_text(encoding="utf-8") if DATA_ENV.exists() else None
     proc = subprocess.Popen([str(EXE)], cwd=str(EXE.parent))
     profile_backup = None
     try:
@@ -175,6 +181,15 @@ def main() -> int:
         if src.exists():
             dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
             print("已还原 dist/.env")
+        # 数据目录的 .env 才是运行时真正生效的那份，必须一并还原
+        if data_env_backup is None:
+            if DATA_ENV.exists():
+                DATA_ENV.unlink()
+                print("已清除测试写入的 数据目录/.env")
+        else:
+            DATA_ENV.parent.mkdir(parents=True, exist_ok=True)
+            DATA_ENV.write_text(data_env_backup, encoding="utf-8")
+            print("已还原 数据目录/.env")
         print("进程已退出")
 
     return 0
