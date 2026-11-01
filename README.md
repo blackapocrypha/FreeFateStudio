@@ -4,6 +4,8 @@
 
 # FreeFateStudio · 命理工作台
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 纯 Python 桌面端的东方命理助手。界面是 PySide6，模型服务在本机进程内跑 FastAPI + LangGraph，
 所有排盘、起卦、黄历计算都在本地完成，基于<a href="https://6tail.cn/calendar/api.html">Lunar</a>计算，只有大模型推理走 DeepSeek API。
 
@@ -170,8 +172,6 @@ FATE_THINKING=0
 提示词要求模型**以 `综合参考` 为准**，`量化参考` 只作旁证，不许同时给出两个互相否定的结论。
 
 
-
-
 ## 打包
 
 ```bash
@@ -223,7 +223,6 @@ tests/
   ui_context_ring.py  进度环各档位渲染与位置自检并截图
   ui_composer_card.py 输入卡片自检（按钮在框内、空输入不可点、多行长高、Enter 提交）
 ```
-
 
 ## 说明
 

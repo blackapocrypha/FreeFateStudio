@@ -45,6 +45,12 @@ def main() -> int:
         shutil.copy2(env_src, DIST / ".env")
         print("已复制 .env ->", DIST / ".env")
 
+    # MIT 要求分发副本时附带许可声明，LICENSE 跟着产物走
+    lic_src = ROOT / "LICENSE"
+    if lic_src.exists() and DIST.exists():
+        shutil.copy2(lic_src, DIST / "LICENSE")
+        print("已复制 LICENSE ->", DIST / "LICENSE")
+
     exe = DIST / f"{NAME}.exe"
     print("完成：", exe, "存在" if exe.exists() else "缺失")
     return 0
